@@ -18,7 +18,7 @@ import (
 // FilterDir is a http.FileSystem middleware that implements filtering of
 // files, which restrict visible files to those in the IncludeList.
 type FilterDir struct {
-	initOnce  sync.Once
+	loadOnce  sync.Once
 	startOnce sync.Once
 	dir       http.Dir
 	options   Options
@@ -59,14 +59,14 @@ func (f *FilterDir) Open(name string) (http.File, error) {
 	}
 	if f.ProdMode == false {
 		f.startOnce.Do(func() {
-			go f.startTerm()
+			go f.startGUI()
 		})
 		f.requests <- name
 		return file, nil
 	}
 
 	// We are in ProdMode, so results will be filtered
-	f.initOnce.Do(f.init)
+	f.loadOnce.Do(f.loadIncludeList)
 
 	if _, ok := f.include[name]; ok {
 		return &File{File: file, name: name, include: f.include}, nil
@@ -75,7 +75,7 @@ func (f *FilterDir) Open(name string) (http.File, error) {
 	return nil, os.ErrNotExist
 }
 
-func (f *FilterDir) init() {
+func (f *FilterDir) loadIncludeList() {
 	f.include = make(map[string]struct{})
 	f.include["/"] = struct{}{}
 	for _, file := range f.IncludeList {
@@ -87,8 +87,7 @@ func (f *FilterDir) init() {
 	}
 }
 
-func (f *FilterDir) startTerm() {
-
+func (f *FilterDir) startGUI() {
 	reqs := processRequests(f.IncludeList, f.requests)
 	screen := gocui.NewGui()
 	if err := screen.Init(); err != nil {
