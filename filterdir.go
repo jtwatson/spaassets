@@ -1,7 +1,6 @@
 package webapps
 
 import (
-	"fmt"
 	"html/template"
 	"log"
 	"net/http"
@@ -9,8 +8,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
+	"golang.org/x/net/context"
+
+	"github.com/jroimartin/gocui"
 	"github.com/shurcooL/vfsgen"
 )
 
@@ -87,43 +88,26 @@ func (f *FilterDir) init() {
 }
 
 func (f *FilterDir) startTerm() {
-	var err error
-	reqs := processRequests(f.IncludeList, f.requests)
 
-	screen, err := NewScreen()
-	if err != nil {
+	reqs := processRequests(f.IncludeList, f.requests)
+	screen := gocui.NewGui()
+	if err := screen.Init(); err != nil {
 		log.Fatal(err)
 	}
 	defer screen.Close()
+	screen.SetLayout(layout)
+	screen.Cursor = true
 
-	for {
-		select {
-		case <-time.After(time.Millisecond * 100):
-			if reqs.Changed() {
-				err = screen.updateStats(reqs.List())
-				screen.displayMsg("List Changed")
-			}
-		case <-screen.Resized:
-			err = screen.updateStats(reqs.List())
-		case <-screen.Clear:
-			reqs.Clear()
-		case <-screen.Save:
-			err = f.saveList(reqs.List())
-			if err == nil {
-				screen.displayMsg("File Saved")
-			}
-		case <-screen.Generate:
-			err = f.generateAssets(reqs.List())
-			if err == nil {
-				screen.displayMsg("Staticly implemented assets have been generated.")
-			}
-		case <-screen.Done:
-			return
-		}
-		if err != nil {
-			screen.Close()
-			fmt.Println(err)
-		}
+	ctx, done := context.WithCancel(context.Background())
+	defer done()
+
+	go pushUpdates(ctx, screen, reqs)
+
+	if err := bindKeys(screen, reqs, f); err != nil {
+		log.Fatal(err)
+	}
+	if err := screen.MainLoop(); err != nil && err != gocui.ErrQuit {
+		log.Fatal(err)
 	}
 }
 

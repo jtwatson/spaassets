@@ -2,196 +2,145 @@ package webapps
 
 import (
 	"fmt"
-	"sync"
+	"strings"
+	"time"
 
-	termbox "github.com/nsf/termbox-go"
+	"golang.org/x/net/context"
+
+	"github.com/jroimartin/gocui"
 )
 
-// Screen represents a display to the current terminal
-type Screen struct {
-	Bg           termbox.Attribute
-	FgBorder     termbox.Attribute
-	FgLabels     termbox.Attribute
-	marginTop    int
-	marginRight  int
-	marginBottom int
-	marginLeft   int
-
-	Done     chan struct{}
-	Resized  chan struct{}
-	Save     chan struct{}
-	Clear    chan struct{}
-	Generate chan struct{}
-
-	mu sync.Mutex
+func layout(g *gocui.Gui) error {
+	maxX, maxY := g.Size()
+	if v, err := g.SetView("logs", 0, 0, maxX-1, maxY-9); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		v.Autoscroll = true
+		_, y := v.Size()
+		fmt.Fprint(v, strings.Repeat("\n", y))
+	}
+	if v, err := g.SetView("files", 0, maxY-9, maxX-1, maxY-7); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		v.FgColor = gocui.ColorGreen
+		fmt.Fprintln(v, "\033[0m 0 files in the list.")
+	}
+	if v, err := g.SetView("commands", 0, maxY-7, maxX-1, maxY-2); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		v.FgColor = gocui.ColorMagenta
+		fmt.Fprintln(v, "\033[0m c : Clear all files from IncludeList")
+		fmt.Fprintln(v, " s : Save current file list to go source")
+		fmt.Fprintln(v, " g : Generate go code that staticly implements all files in list")
+		fmt.Fprint(v, " q : Quit")
+	}
+	if v, err := g.SetView("prompt", 0, maxY-2, maxX, maxY); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		v.Frame = false
+		fmt.Fprintln(v, "   : ")
+	}
+	if v, err := g.SetView("input", 5, maxY-2, maxX, maxY); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		v.Frame = false
+		v.Editable = true
+		if err := g.SetCurrentView("input"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// NewScreen instanciates a Screen object
-func NewScreen() (*Screen, error) {
-	s := &Screen{
-		Bg:           termbox.ColorBlack,
-		FgBorder:     termbox.ColorWhite,
-		FgLabels:     termbox.ColorCyan,
-		marginTop:    1,
-		marginRight:  1,
-		marginBottom: 2,
-		marginLeft:   1,
+func bindKeys(g *gocui.Gui, reqs *sortedList, f *FilterDir) error {
 
-		Done:     make(chan struct{}),
-		Resized:  make(chan struct{}, 10),
-		Save:     make(chan struct{}),
-		Clear:    make(chan struct{}),
-		Generate: make(chan struct{}),
-	}
-	err := s.init()
-	if err != nil {
-		return nil, err
-	}
-	return s, nil
-}
-
-func (s *Screen) init() error {
-	if err := termbox.Init(); err != nil {
+	if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, quit); err != nil {
 		return err
 	}
-	s.redrawDisplay()
-
-	e := captureEvents(s)
-	processEvents(s, e)
+	if err := g.SetKeybinding("input", gocui.KeyEnter, gocui.ModNone, processInput(reqs, f)); err != nil {
+		return err
+	}
 
 	return nil
 }
 
-// Close releases resources and terminal
-func (s *Screen) Close() {
-	termbox.Interrupt()
-	<-s.Done
-	termbox.Close()
-}
-
-func (s *Screen) redrawDisplay() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	termbox.Clear(s.FgBorder, s.Bg)
-
-	err := s.drawBorder()
-	if err != nil {
-		return err
-	}
-	return s.drawControls()
-}
-
-func (s *Screen) drawBorder() error {
-	w, h := termbox.Size()
-	for x := s.marginLeft; x < w-s.marginRight; x++ {
-		termbox.SetCell(x, -1+s.marginTop, '\u2500', s.FgBorder, s.FgBorder)
-		termbox.SetCell(x, h-s.marginBottom, '\u2500', s.FgBorder, s.FgBorder)
-	}
-	for y := s.marginTop; y < h-s.marginBottom; y++ {
-		termbox.SetCell(-1+s.marginLeft, y, '\u2502', s.FgBorder, s.FgBorder)
-		termbox.SetCell(w-s.marginRight, y, '\u2502', s.FgBorder, s.FgBorder)
-	}
-	termbox.SetCell(s.marginLeft-1, s.marginTop-1, '\u250C', s.FgBorder, s.FgBorder)
-	termbox.SetCell(s.marginLeft-1, h-s.marginBottom, '\u2514', s.FgBorder, s.FgBorder)
-	termbox.SetCell(w-s.marginRight, h-s.marginBottom, '\u2518', s.FgBorder, s.FgBorder)
-	termbox.SetCell(w-s.marginRight, s.marginTop-1, '\u2510', s.FgBorder, s.FgBorder)
-	return termbox.Flush()
-}
-
-func (s *Screen) drawControls() error {
-	_, h := termbox.Size()
-
-	msg := "q :Quit  c :Clear IncludeList  s :Save IncludeList  g :Generate static assets"
-	for i, c := range msg {
-		termbox.SetCell(1+i, h-1, c, s.FgLabels, s.Bg)
-	}
-	return termbox.Flush()
-}
-
-func (s *Screen) displayMsg(msg string) error {
-	s.clearMsg()
-	w, h := termbox.Size()
-	max := len(msg)
-	if max > w-s.marginRight-s.marginLeft-2 {
-		max = w - s.marginRight - s.marginLeft - 2
-	}
-	for x := 0; x < max; x++ {
-		termbox.SetCell(x+s.marginLeft, h-s.marginBottom-1, rune(msg[x]), s.FgLabels, s.Bg)
-	}
-	return termbox.Flush()
-}
-
-func (s *Screen) clearMsg() error {
-	w, h := termbox.Size()
-
-	for x := s.marginLeft; x < w-s.marginRight-1; x++ {
-		termbox.SetCell(x, h-s.marginBottom-1, ' ', s.FgLabels, s.Bg)
-	}
-	return termbox.Flush()
-}
-
-func (s *Screen) updateStats(list []string) error {
-	_, h := termbox.Size()
-
-	msg := fmt.Sprintf("%d files in the list.", len(list))
-	for i, c := range msg {
-		termbox.SetCell(1+i, h-s.marginBottom-2, c, s.FgLabels, s.Bg)
-	}
-	return termbox.Flush()
-}
-
-func captureEvents(s *Screen) <-chan termbox.Event {
-	events := make(chan termbox.Event)
-	go func() {
-		defer close(events)
-		for {
-			switch ev := termbox.PollEvent(); ev.Type {
-			case termbox.EventInterrupt:
-				return
-			default:
-				select {
-				case events <- ev:
-				case <-s.Done:
-				}
-			}
-		}
-	}()
-	return events
-}
-
-func processEvents(screen *Screen, events <-chan termbox.Event) {
-	go func() {
-		defer close(screen.Done)
-		for {
-			if ev, ok := <-events; ok {
-				switch ev.Type {
-				case termbox.EventKey:
-					if ev.Ch == 0 {
-						switch ev.Key {
-						case termbox.KeyEsc, termbox.KeyCtrlQ:
-							return
-						}
-					} else {
-						switch ev.Ch {
-						case 115, 83: // s, S
-							screen.Save <- struct{}{}
-						case 99, 67: // c, C
-							screen.Clear <- struct{}{}
-						case 103, 71: // g, G
-							screen.Generate <- struct{}{}
-						case 81, 113: // Q, q
-							return
-						default:
-							// fmt.Println(ev.Ch)
-						}
+func pushUpdates(ctx context.Context, g *gocui.Gui, reqs *sortedList) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Millisecond * 100):
+			g.Execute(func(g *gocui.Gui) error {
+				if reqs.Changed() {
+					v, err := g.View("files")
+					if err != nil {
+						return err
 					}
-				case termbox.EventResize:
-					screen.redrawDisplay()
-					screen.Resized <- struct{}{}
+					v.Clear()
+					fmt.Fprintf(v, "\033[0m %d files in the list.", len(reqs.List()))
 				}
-			} else {
-				return
-			}
+				return nil
+			})
 		}
-	}()
+	}
+}
+
+func processInput(reqs *sortedList, f *FilterDir) func(*gocui.Gui, *gocui.View) error {
+	return func(g *gocui.Gui, v *gocui.View) error {
+		input := strings.ToLower(strings.TrimSpace(v.ViewBuffer()))
+		v.Clear()
+
+		switch input {
+		case "q", "quit":
+			return gocui.ErrQuit
+		case "c", "clear":
+			reqs.Clear()
+			g.Execute(func(g *gocui.Gui) error {
+				v, err := g.View("logs")
+				if err != nil {
+					return err
+				}
+				fmt.Fprint(v, "\n List cleared.")
+				return nil
+			})
+		case "s", "save":
+			saveErr := f.saveList(reqs.List())
+			g.Execute(func(g *gocui.Gui) error {
+				v, err := g.View("logs")
+				if err != nil {
+					return err
+				}
+				if saveErr != nil {
+					fmt.Fprintln(v, saveErr.Error())
+				} else {
+					fmt.Fprint(v, "\n IncludeList successfully saved to go source.")
+				}
+				return nil
+			})
+		case "g", "generate":
+			saveErr := f.generateAssets(reqs.List())
+			g.Execute(func(g *gocui.Gui) error {
+				v, err := g.View("logs")
+				if err != nil {
+					return err
+				}
+				if saveErr != nil {
+					fmt.Fprintln(v, saveErr.Error())
+				} else {
+					fmt.Fprint(v, "\n Staticly implemented assets have been generated.")
+				}
+				return nil
+			})
+		}
+		return nil
+	}
+}
+
+func quit(g *gocui.Gui, v *gocui.View) error {
+	return gocui.ErrQuit
 }
