@@ -12,6 +12,8 @@ import (
 
 func layout(g *gocui.Gui) error {
 	maxX, maxY := g.Size()
+
+	// Log view
 	if v, err := g.SetView("logs", 0, 0, maxX-1, maxY-9); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
@@ -20,6 +22,8 @@ func layout(g *gocui.Gui) error {
 		_, y := v.Size()
 		fmt.Fprint(v, strings.Repeat("\n", y))
 	}
+
+	// File summary view
 	if v, err := g.SetView("files", 0, maxY-9, maxX-1, maxY-7); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
@@ -27,6 +31,8 @@ func layout(g *gocui.Gui) error {
 		v.FgColor = gocui.ColorGreen
 		fmt.Fprintln(v, "\033[0m 0 files in the list.")
 	}
+
+	// Command options view
 	if v, err := g.SetView("commands", 0, maxY-7, maxX-1, maxY-2); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
@@ -37,6 +43,8 @@ func layout(g *gocui.Gui) error {
 		fmt.Fprintln(v, " g : Generate go code that staticly implements all files in list")
 		fmt.Fprint(v, " q : Quit")
 	}
+
+	// Prompt view
 	if v, err := g.SetView("prompt", 0, maxY-2, maxX, maxY); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
@@ -44,6 +52,8 @@ func layout(g *gocui.Gui) error {
 		v.Frame = false
 		fmt.Fprintln(v, "   : ")
 	}
+
+	// Input view
 	if v, err := g.SetView("input", 5, maxY-2, maxX, maxY); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
@@ -59,16 +69,19 @@ func layout(g *gocui.Gui) error {
 
 func bindKeys(g *gocui.Gui, reqs *sortedList, f *FilterDir) error {
 
-	if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, quit); err != nil {
+	// Ctr-C will shutdown the GUI
+	if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, shutdown); err != nil {
 		return err
 	}
+
+	// Process all user input from the input view
 	if err := g.SetKeybinding("input", gocui.KeyEnter, gocui.ModNone, processInput(reqs, f)); err != nil {
 		return err
 	}
-
 	return nil
 }
 
+// Check for file changes every so often, and if changes are found push to GUI
 func pushUpdates(ctx context.Context, g *gocui.Gui, reqs *sortedList) {
 	for {
 		select {
@@ -90,6 +103,7 @@ func pushUpdates(ctx context.Context, g *gocui.Gui, reqs *sortedList) {
 	}
 }
 
+// Handle user input
 func processInput(reqs *sortedList, f *FilterDir) func(*gocui.Gui, *gocui.View) error {
 	return func(g *gocui.Gui, v *gocui.View) error {
 		input := strings.ToLower(strings.TrimSpace(v.ViewBuffer()))
@@ -141,6 +155,6 @@ func processInput(reqs *sortedList, f *FilterDir) func(*gocui.Gui, *gocui.View) 
 	}
 }
 
-func quit(g *gocui.Gui, v *gocui.View) error {
+func shutdown(g *gocui.Gui, v *gocui.View) error {
 	return gocui.ErrQuit
 }

@@ -25,12 +25,12 @@ type FilterDir struct {
 	requests  chan string
 	include   map[string]struct{}
 
-	// ProdMode enables the filter so only files found in IncludeList
+	// FilterMode enables the filter so only files found in IncludeList
 	// will be returned.
-	ProdMode bool
+	FilterMode bool
 
 	// IncludeList is a slice of files that are allowed to be returned when
-	// ProdMode is set to true.
+	// FilterMode is set to true.
 	IncludeList []string
 }
 
@@ -57,7 +57,7 @@ func (f *FilterDir) Open(name string) (http.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if f.ProdMode == false {
+	if f.FilterMode == false {
 		f.startOnce.Do(func() {
 			go f.startGUI()
 		})
@@ -65,7 +65,7 @@ func (f *FilterDir) Open(name string) (http.File, error) {
 		return file, nil
 	}
 
-	// We are in ProdMode, so results will be filtered
+	// We are in FilterMode, so results will be filtered
 	f.loadOnce.Do(f.loadIncludeList)
 
 	if _, ok := f.include[name]; ok {
@@ -88,40 +88,39 @@ func (f *FilterDir) loadIncludeList() {
 }
 
 func (f *FilterDir) startGUI() {
+
+	// Process incoming file requests
 	reqs := processRequests(f.IncludeList, f.requests)
-	screen := gocui.NewGui()
-	if err := screen.Init(); err != nil {
+
+	// Create GUI
+	gui := gocui.NewGui()
+	if err := gui.Init(); err != nil {
 		log.Fatal(err)
 	}
-	defer screen.Close()
-	screen.SetLayout(layout)
-	screen.Cursor = true
+	defer gui.Close()
 
+	// Draw UI
+	gui.SetLayout(layout)
+	gui.Cursor = true
+
+	// Push file list changes to UI
 	ctx, done := context.WithCancel(context.Background())
 	defer done()
+	go pushUpdates(ctx, gui, reqs)
 
-	go pushUpdates(ctx, screen, reqs)
-
-	if err := bindKeys(screen, reqs, f); err != nil {
+	// Wire up keys to actions
+	if err := bindKeys(gui, reqs, f); err != nil {
 		log.Fatal(err)
 	}
-	if err := screen.MainLoop(); err != nil && err != gocui.ErrQuit {
+
+	// Run GUI
+	if err := gui.MainLoop(); err != nil && err != gocui.ErrQuit {
 		log.Fatal(err)
 	}
-}
-
-func (f *FilterDir) generateAssets(list []string) error {
-	f.IncludeList = list
-	f.ProdMode = true
-
-	err := vfsgen.Generate(f, f.Options())
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 func (f *FilterDir) saveList(list []string) error {
+	f.IncludeList = list
 
 	// Create output file.
 	lf, err := os.Create(f.options.ListFileName)
@@ -150,64 +149,15 @@ func (f *FilterDir) saveList(list []string) error {
 	return nil
 }
 
-func processRequests(savedIncludeList []string, requests chan string) *sortedList {
-	var changed bool
-	qchan := make(chan struct{})
-	achan := make(chan []string)
-	cchan := make(chan bool)
-	clear := make(chan struct{})
+func (f *FilterDir) generateAssets(list []string) error {
+	f.IncludeList = list
+	f.FilterMode = true
 
-	includeList := make([]string, 0, 100)
-	includeMap := make(map[string]bool)
-
-	go func() {
-		for {
-			select {
-			case r := <-requests:
-				if includeMap[r] == false {
-					includeMap[r] = true
-					includeList = append(includeList, r)
-					changed = true
-				}
-			case <-qchan:
-				// sort includeList
-				if changed {
-					sort.StringSlice(includeList).Sort()
-					changed = false
-				}
-				sortedList := make([]string, len(includeList))
-				copy(sortedList, includeList)
-				achan <- sortedList
-			case cchan <- changed:
-			case <-clear:
-				includeList = make([]string, 0, 100)
-				includeMap = make(map[string]bool)
-				changed = true
-			}
-		}
-	}()
-
-	return &sortedList{question: qchan, answer: achan, changed: cchan, clear: clear}
-}
-
-type sortedList struct {
-	question chan struct{}
-	answer   chan []string
-	changed  chan bool
-	clear    chan struct{}
-}
-
-func (l *sortedList) List() []string {
-	l.question <- struct{}{}
-	return <-l.answer
-}
-
-func (l *sortedList) Changed() bool {
-	return <-l.changed
-}
-
-func (l *sortedList) Clear() {
-	l.clear <- struct{}{}
+	err := vfsgen.Generate(f, f.Options())
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // A File is returned by a FileSystem's Open method and can be
@@ -237,7 +187,7 @@ func (f *File) Readdir(count int) ([]os.FileInfo, error) {
 	return newInfo, err
 }
 
-// Options for vfsgen code generation.
+// Options for code generation.
 type Options struct {
 	// Filename of the generated Go code output (including extension).
 	// If left empty, it defaults to "{{toLower .VariableName}}_vfsdata.go".
@@ -289,6 +239,66 @@ func (opt *Options) fillMissing() {
 	}
 }
 
+func processRequests(savedIncludeList []string, requests chan string) *sortedList {
+	var changed bool
+	qchan := make(chan struct{})
+	achan := make(chan []string)
+	cchan := make(chan bool)
+	clear := make(chan struct{})
+
+	includeList := make([]string, 0, 100)
+	includeMap := make(map[string]bool)
+
+	go func() {
+		for {
+			select {
+			case r := <-requests:
+				if includeMap[r] == false {
+					includeMap[r] = true
+					includeList = append(includeList, r)
+					changed = true
+				}
+			case <-qchan:
+				if changed {
+					// sort includeList
+					sort.StringSlice(includeList).Sort()
+					changed = false
+				}
+				sortedList := make([]string, len(includeList))
+				copy(sortedList, includeList)
+				achan <- sortedList
+			case cchan <- changed:
+			case <-clear:
+				includeList = make([]string, 0, 100)
+				includeMap = make(map[string]bool)
+				changed = true
+			}
+		}
+	}()
+
+	return &sortedList{q: qchan, a: achan, chg: cchan, c: clear}
+}
+
+type sortedList struct {
+	q   chan struct{}
+	a   chan []string
+	chg chan bool
+	c   chan struct{}
+}
+
+func (l *sortedList) List() []string {
+	l.q <- struct{}{}
+	return <-l.a
+}
+
+func (l *sortedList) Changed() bool {
+	return <-l.chg
+}
+
+func (l *sortedList) Clear() {
+	l.c <- struct{}{}
+}
+
 var t = template.Must(template.New("").Parse(`{{define "Header"}}// Code generated by FilterDir
 
 {{with .ListFileBuildTags}}// +build {{.}}
@@ -299,7 +309,7 @@ func init() {
 	{{.VariableName}}.IncludeList = []string{
 {{end}}
 
-{{define "Files"}}	"{{.}}",
+{{define "Files"}}		"{{.}}",
 {{end}}
 
 {{define "Footer"}}	}
