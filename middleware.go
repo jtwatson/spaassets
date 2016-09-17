@@ -22,7 +22,14 @@ import (
 //
 func DeepLink(next http.Handler, appURL string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if ext := filepath.Ext(r.URL.Path); ext == "" {
+		path := r.URL.Path
+
+		// Handle Angular 2 optional route parameters by removing them.
+		if i := strings.Index(path, ";"); i > -1 {
+			path = path[:i]
+		}
+
+		if ext := filepath.Ext(path); ext == "" {
 			r.URL.Path = appURL
 		}
 		next.ServeHTTP(w, r)
